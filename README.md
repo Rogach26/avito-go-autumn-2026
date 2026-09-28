@@ -50,6 +50,41 @@ make run
 
 Сервис доступен по адресу `http://localhost:8080`
 
+## Docker
+
+Образ собирается из корня репозитория:
+
+```bash
+docker build -f deploy/Dockerfile -t trip-service:lab1 .
+```
+
+PostgreSQL и миграции поднимаются через `tripgoctl`. При запуске контейнера
+адрес `localhost` из сгенерированного `.env` заменяется на адрес хоста, потому
+что внутри контейнера `localhost` указывает на сам контейнер:
+
+```bash
+tripgoctl environment start
+make migrate
+
+source .env
+CONTAINER_DATABASE_URL="${DATABASE_URL/localhost/host.docker.internal}"
+
+docker run --rm -d \
+  --name trip-service \
+  --add-host=host.docker.internal:host-gateway \
+  --env-file .env.example \
+  --env-file .env \
+  -e DATABASE_URL="$CONTAINER_DATABASE_URL" \
+  -p 8080:8080 \
+  trip-service:lab1
+
+curl -i http://localhost:8080/ready
+docker stop --timeout 15 trip-service
+```
+
+Итоговый образ `trip-service:lab1` для `linux/amd64` построен на `scratch`,
+запускается от пользователя `65532:65532` и имеет размер `10.9 MB`
+
 ## Команды
 
 | Команда | Назначение |
