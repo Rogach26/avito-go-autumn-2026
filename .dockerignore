@@ -1,0 +1,10 @@
+.git
+.gitignore
+.env
+.env.*
+.tripgo
+bin
+**/*_test.go
+.idea
+.vscode
+.DS_Store
