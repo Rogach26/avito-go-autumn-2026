@@ -23,6 +23,11 @@ type Config struct {
 	HTTPReadHeaderTimeout   time.Duration
 	HTTPWriteTimeout        time.Duration
 	HTTPIdleTimeout         time.Duration
+	OTelServiceName         string
+	OTelExporterEndpoint    string
+	OTelExporterProtocol    string
+	OTelResourceAttributes  string
+	OTelTracesSampler       string
 }
 
 func Load() (Config, error) {
@@ -87,6 +92,32 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	otelServiceName, err := readRequiredStringEnv("OTEL_SERVICE_NAME")
+	if err != nil {
+		return Config{}, err
+	}
+	otelExporterEndpoint, err := readRequiredStringEnv("OTEL_EXPORTER_OTLP_ENDPOINT")
+	if err != nil {
+		return Config{}, err
+	}
+	otelExporterProtocol, err := readRequiredStringEnv("OTEL_EXPORTER_OTLP_PROTOCOL")
+	if err != nil {
+		return Config{}, err
+	}
+	if otelExporterProtocol != "http/protobuf" {
+		return Config{}, fmt.Errorf("OTEL_EXPORTER_OTLP_PROTOCOL must be http/protobuf")
+	}
+	otelResourceAttributes, err := readRequiredStringEnv("OTEL_RESOURCE_ATTRIBUTES")
+	if err != nil {
+		return Config{}, err
+	}
+	otelTracesSampler, err := readRequiredStringEnv("OTEL_TRACES_SAMPLER")
+	if err != nil {
+		return Config{}, err
+	}
+	if otelTracesSampler != "parentbased_always_on" {
+		return Config{}, fmt.Errorf("OTEL_TRACES_SAMPLER must be parentbased_always_on")
+	}
 
 	return Config{
 		HTTPAddr:                httpAddr,
@@ -102,6 +133,11 @@ func Load() (Config, error) {
 		HTTPReadHeaderTimeout:   httpReadHeaderTimeout,
 		HTTPWriteTimeout:        httpWriteTimeout,
 		HTTPIdleTimeout:         httpIdleTimeout,
+		OTelServiceName:         otelServiceName,
+		OTelExporterEndpoint:    otelExporterEndpoint,
+		OTelExporterProtocol:    otelExporterProtocol,
+		OTelResourceAttributes:  otelResourceAttributes,
+		OTelTracesSampler:       otelTracesSampler,
 	}, nil
 }
 

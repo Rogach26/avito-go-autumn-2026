@@ -1,16 +1,9 @@
 package model
 
 import (
-	"errors"
 	"time"
 
 	"github.com/google/uuid"
-)
-
-var (
-	ErrTripNotFound  = errors.New("trip not found")
-	ErrTripCompleted = errors.New("trip completed")
-	ErrDriverBusy    = errors.New("driver busy")
 )
 
 type TripStatus string
@@ -43,4 +36,12 @@ type TripStatusChange struct {
 	ToStatus   TripStatus
 	Reason     string
 	ChangedAt  time.Time
+}
+
+type CreateTripRequest struct {
+	UserID     uuid.UUID
+	DriverID   uuid.UUID
+	StartPoint Coordinates
+	EndPoint   Coordinates
+	Price      int64
 }
