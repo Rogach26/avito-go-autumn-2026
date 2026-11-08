@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/Rogach26/avito-go-autumn-2026/internal/config"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/Rogach26/avito-go-autumn-2026/internal/config"
 )
 
-func NewPool(ctx context.Context, cfg config.Config) (*pgxpool.Pool, error) {
+func NewPool(ctx context.Context, cfg config.Config, tracer pgx.QueryTracer) (*pgxpool.Pool, error) {
 	poolConfig, err := pgxpool.ParseConfig(cfg.DatabaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse database configuration: %w", err)
@@ -18,6 +20,7 @@ func NewPool(ctx context.Context, cfg config.Config) (*pgxpool.Pool, error) {
 	poolConfig.MinConns = cfg.DatabaseMinConns
 	poolConfig.MaxConnLifetime = cfg.DatabaseMaxConnLifetime
 	poolConfig.ConnConfig.ConnectTimeout = cfg.DatabaseConnectTimeout
+	poolConfig.ConnConfig.Tracer = tracer
 
 	connectContext, cancel := context.WithTimeout(ctx, cfg.DatabaseConnectTimeout)
 	defer cancel()
