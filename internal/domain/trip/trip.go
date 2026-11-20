@@ -13,6 +13,7 @@ const (
 	StatusCompleted    Status = "completed"
 	fieldFinishedAt           = "finished_at"
 	nonEmptyUUIDReason        = "must be a non-empty UUID"
+	nonZeroTimeReason         = "must not be zero"
 )
 
 type Coordinates struct {
@@ -21,15 +22,16 @@ type Coordinates struct {
 }
 
 type Trip struct {
-	id         uuid.UUID
-	userID     uuid.UUID
-	driverID   uuid.UUID
-	startPoint Coordinates
-	endPoint   Coordinates
-	price      int64
-	status     Status
-	startedAt  time.Time
-	finishedAt *time.Time
+	id             uuid.UUID
+	userID         uuid.UUID
+	driverID       uuid.UUID
+	startPoint     Coordinates
+	endPoint       Coordinates
+	price          int64
+	status         Status
+	startedAt      time.Time
+	finishedAt     *time.Time
+	lastPositionAt *time.Time
 }
 
 func New(
@@ -41,7 +43,7 @@ func New(
 	price int64,
 	startedAt time.Time,
 ) (Trip, error) {
-	return Restore(id, userID, driverID, startPoint, endPoint, price, StatusActive, startedAt, nil)
+	return Restore(id, userID, driverID, startPoint, endPoint, price, StatusActive, startedAt, nil, nil)
 }
 
 func Restore(
@@ -54,17 +56,19 @@ func Restore(
 	status Status,
 	startedAt time.Time,
 	finishedAt *time.Time,
+	lastPositionAt *time.Time,
 ) (Trip, error) {
 	trip := Trip{
-		id:         id,
-		userID:     userID,
-		driverID:   driverID,
-		startPoint: startPoint,
-		endPoint:   endPoint,
-		price:      price,
-		status:     status,
-		startedAt:  startedAt,
-		finishedAt: finishedAt,
+		id:             id,
+		userID:         userID,
+		driverID:       driverID,
+		startPoint:     startPoint,
+		endPoint:       endPoint,
+		price:          price,
+		status:         status,
+		startedAt:      startedAt,
+		finishedAt:     finishedAt,
+		lastPositionAt: lastPositionAt,
 	}
 	if err := validate(trip); err != nil {
 		return Trip{}, err
@@ -74,6 +78,10 @@ func Restore(
 		finishedAt := trip.finishedAt.UTC().Truncate(time.Microsecond)
 		trip.finishedAt = &finishedAt
 	}
+	if trip.lastPositionAt != nil {
+		lastPositionAt := trip.lastPositionAt.UTC().Truncate(time.Microsecond)
+		trip.lastPositionAt = &lastPositionAt
+	}
 	return trip, nil
 }
 
@@ -82,7 +90,7 @@ func (t *Trip) Finish(finishedAt time.Time) error {
 		return ErrTripCompleted
 	}
 	if finishedAt.IsZero() {
-		return &ValidationError{Field: fieldFinishedAt, Reason: "must not be zero"}
+		return &ValidationError{Field: fieldFinishedAt, Reason: nonZeroTimeReason}
 	}
 
 	finishedAt = finishedAt.UTC().Truncate(time.Microsecond)
@@ -131,6 +139,14 @@ func (t Trip) FinishedAt() *time.Time {
 	return &finishedAt
 }
 
+func (t Trip) LastPositionAt() *time.Time {
+	if t.lastPositionAt == nil {
+		return nil
+	}
+	lastPositionAt := *t.lastPositionAt
+	return &lastPositionAt
+}
+
 func validate(trip Trip) error {
 	if trip.id == uuid.Nil {
 		return &ValidationError{Field: "id", Reason: nonEmptyUUIDReason}
@@ -151,7 +167,7 @@ func validate(trip Trip) error {
 		return &ValidationError{Field: "price", Reason: "must not be negative"}
 	}
 	if trip.startedAt.IsZero() {
-		return &ValidationError{Field: "started_at", Reason: "must not be zero"}
+		return &ValidationError{Field: "started_at", Reason: nonZeroTimeReason}
 	}
 	if trip.status != StatusActive && trip.status != StatusCompleted {
 		return &ValidationError{Field: "status", Reason: "must be active or completed"}

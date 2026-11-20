@@ -43,5 +43,6 @@ func columns() []string {
 		statusColumn,
 		"started_at",
 		"finished_at",
+		"last_position_at",
 	}
 }

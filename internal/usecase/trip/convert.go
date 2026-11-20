@@ -18,10 +18,11 @@ func FromDomain(entity tripdomain.Trip) model.Trip {
 			Latitude:  entity.EndPoint().Latitude,
 			Longitude: entity.EndPoint().Longitude,
 		},
-		Price:      entity.Price(),
-		Status:     model.TripStatus(entity.Status()),
-		StartedAt:  entity.StartedAt(),
-		FinishedAt: entity.FinishedAt(),
+		Price:          entity.Price(),
+		Status:         model.TripStatus(entity.Status()),
+		StartedAt:      entity.StartedAt(),
+		FinishedAt:     entity.FinishedAt(),
+		LastPositionAt: entity.LastPositionAt(),
 	}
 }
 
@@ -42,5 +43,6 @@ func ToDomain(trip model.Trip) (tripdomain.Trip, error) {
 		tripdomain.Status(trip.Status),
 		trip.StartedAt,
 		trip.FinishedAt,
+		trip.LastPositionAt,
 	)
 }

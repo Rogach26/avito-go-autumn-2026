@@ -8,6 +8,8 @@ import (
 
 	api "github.com/Rogach26/avito-go-autumn-2026/internal/generated"
 	"github.com/Rogach26/avito-go-autumn-2026/internal/http/domainerror"
+	createposition "github.com/Rogach26/avito-go-autumn-2026/internal/http/position/create"
+	listposition "github.com/Rogach26/avito-go-autumn-2026/internal/http/position/list"
 	"github.com/Rogach26/avito-go-autumn-2026/internal/http/response"
 	createhttp "github.com/Rogach26/avito-go-autumn-2026/internal/http/trip/create"
 	finishhttp "github.com/Rogach26/avito-go-autumn-2026/internal/http/trip/finish"
@@ -15,26 +17,32 @@ import (
 )
 
 type Server struct {
-	createHandler *createhttp.Handler
-	getHandler    *gethttp.Handler
-	finishHandler *finishhttp.Handler
-	database      databasePinger
-	queryTimeout  time.Duration
+	createHandler         *createhttp.Handler
+	getHandler            *gethttp.Handler
+	finishHandler         *finishhttp.Handler
+	createPositionHandler *createposition.Handler
+	listPositionsHandler  *listposition.Handler
+	database              databasePinger
+	queryTimeout          time.Duration
 }
 
 func NewServer(
 	createHandler *createhttp.Handler,
 	getHandler *gethttp.Handler,
 	finishHandler *finishhttp.Handler,
+	createPositionHandler *createposition.Handler,
+	listPositionsHandler *listposition.Handler,
 	database databasePinger,
 	queryTimeout time.Duration,
 ) *Server {
 	return &Server{
-		createHandler: createHandler,
-		getHandler:    getHandler,
-		finishHandler: finishHandler,
-		database:      database,
-		queryTimeout:  queryTimeout,
+		createHandler:         createHandler,
+		getHandler:            getHandler,
+		finishHandler:         finishHandler,
+		createPositionHandler: createPositionHandler,
+		listPositionsHandler:  listPositionsHandler,
+		database:              database,
+		queryTimeout:          queryTimeout,
 	}
 }
 
@@ -48,6 +56,14 @@ func (s *Server) GetTrip(w http.ResponseWriter, r *http.Request, id api.TripId) 
 
 func (s *Server) FinishTrip(w http.ResponseWriter, r *http.Request, id api.TripId) {
 	s.finishHandler.Handle(w, r, id)
+}
+
+func (s *Server) CreateTripPosition(w http.ResponseWriter, r *http.Request, id api.TripId) {
+	s.createPositionHandler.Handle(w, r, id)
+}
+
+func (s *Server) ListTripPositions(w http.ResponseWriter, r *http.Request, id api.TripId) {
+	s.listPositionsHandler.Handle(w, r, id)
 }
 
 func (s *Server) Health(w http.ResponseWriter, _ *http.Request) {

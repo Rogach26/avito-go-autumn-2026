@@ -10,7 +10,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Rogach26/avito-go-autumn-2026/internal/config"
+	pushgateway "github.com/Rogach26/avito-go-autumn-2026/internal/gateway/push"
 	httpapi "github.com/Rogach26/avito-go-autumn-2026/internal/http"
+	createpositionhttp "github.com/Rogach26/avito-go-autumn-2026/internal/http/position/create"
+	listpositionhttp "github.com/Rogach26/avito-go-autumn-2026/internal/http/position/list"
 	createhttp "github.com/Rogach26/avito-go-autumn-2026/internal/http/trip/create"
 	finishhttp "github.com/Rogach26/avito-go-autumn-2026/internal/http/trip/finish"
 	gethttp "github.com/Rogach26/avito-go-autumn-2026/internal/http/trip/get"
@@ -18,14 +21,19 @@ import (
 	"github.com/Rogach26/avito-go-autumn-2026/internal/infra/postgres/transaction"
 	"github.com/Rogach26/avito-go-autumn-2026/internal/infra/telemetry"
 	triprepository "github.com/Rogach26/avito-go-autumn-2026/internal/repository/trip"
+	createposition "github.com/Rogach26/avito-go-autumn-2026/internal/usecase/position/create"
+	listposition "github.com/Rogach26/avito-go-autumn-2026/internal/usecase/position/list"
 	createusecase "github.com/Rogach26/avito-go-autumn-2026/internal/usecase/trip/create"
 	finishusecase "github.com/Rogach26/avito-go-autumn-2026/internal/usecase/trip/finish"
 	getusecase "github.com/Rogach26/avito-go-autumn-2026/internal/usecase/trip/get"
+	positionworker "github.com/Rogach26/avito-go-autumn-2026/internal/worker/positions"
 )
 
 type Container struct {
 	server    *http.Server
 	pool      *pgxpool.Pool
+	push      *pushgateway.Client
+	positions *positionworker.WorkerPool
 	telemetry *telemetry.Telemetry
 	logger    *slog.Logger
 }
@@ -67,16 +75,48 @@ func New(ctx context.Context, cfg config.Config) (*Container, error) {
 		pool.Close()
 		return nil, errors.Join(err, telemetryProviders.Shutdown(ctx))
 	}
+	positionMetrics, err := telemetry.NewPositionMetrics(meter)
+	if err != nil {
+		pool.Close()
+		return nil, errors.Join(err, telemetryProviders.Shutdown(ctx))
+	}
+
+	pushClient, err := pushgateway.New(cfg.PushHTTPURL, cfg.PushRequestTimeout, telemetryProviders.TracerProvider())
+	if err != nil {
+		pool.Close()
+		return nil, errors.Join(err, telemetryProviders.Shutdown(ctx))
+	}
+	positionWorker, err := positionworker.New(
+		repository,
+		pushClient,
+		positionMetrics,
+		logger,
+		telemetryProviders.TracerProvider(),
+		cfg.PositionCheckInterval,
+		cfg.PositionStaleAfter,
+		cfg.PushRequestTimeout,
+		cfg.PositionWorkers,
+		cfg.PositionQueueSize,
+	)
+	if err != nil {
+		pushClient.CloseIdleConnections()
+		pool.Close()
+		return nil, errors.Join(err, telemetryProviders.Shutdown(ctx))
+	}
 
 	txManager := transaction.NewManager(pool, cfg.DatabaseQueryTimeout, logger)
 	createUseCase := createusecase.New(repository, txManager, tripMetrics, logger)
 	getUseCase := getusecase.New(repository)
 	finishUseCase := finishusecase.New(repository, txManager, tripMetrics, logger)
+	createPositionUseCase := createposition.New(repository, txManager, positionMetrics, positionWorker)
+	listPositionUseCase := listposition.New(repository)
 
 	serverHandler := httpapi.NewServer(
 		createhttp.NewHandler(createUseCase, logger),
 		gethttp.NewHandler(getUseCase, logger),
 		finishhttp.NewHandler(finishUseCase, logger),
+		createpositionhttp.NewHandler(createPositionUseCase, logger),
+		listpositionhttp.NewHandler(listPositionUseCase, logger),
 		pool,
 		cfg.DatabaseQueryTimeout,
 	)
@@ -97,9 +137,15 @@ func New(ctx context.Context, cfg config.Config) (*Container, error) {
 	return &Container{
 		server:    server,
 		pool:      pool,
+		push:      pushClient,
+		positions: positionWorker,
 		telemetry: telemetryProviders,
 		logger:    logger,
 	}, nil
+}
+
+func (c *Container) Start(ctx context.Context) {
+	c.positions.Start(ctx)
 }
 
 func (c *Container) Run() error {
@@ -119,6 +165,10 @@ func (c *Container) Shutdown(ctx context.Context) error {
 			shutdownError = errors.Join(shutdownError, fmt.Errorf("close HTTP server: %w", closeErr))
 		}
 	}
+	if err := c.positions.Shutdown(ctx); err != nil {
+		shutdownError = errors.Join(shutdownError, fmt.Errorf("shutdown position worker: %w", err))
+	}
+	c.push.CloseIdleConnections()
 
 	poolClosed := make(chan struct{})
 	go func() {

@@ -32,6 +32,7 @@ func (r *Repository) Save(ctx context.Context, trip model.Trip) error {
 			string(trip.Status),
 			trip.StartedAt,
 			trip.FinishedAt,
+			trip.LastPositionAt,
 		).
 		PlaceholderFormat(squirrel.Dollar).
 		ToSql()
@@ -113,4 +114,67 @@ func (r *Repository) AppendStatusHistory(ctx context.Context, change model.TripS
 		return fmt.Errorf("append status history: %w", err)
 	}
 	return nil
+}
+
+func (r *Repository) SavePosition(ctx context.Context, position model.TripPosition) (model.TripPosition, error) {
+	updateQuery, updateArgs, err := squirrel.
+		Update("trips").
+		Set(
+			"last_position_at",
+			squirrel.Expr(
+				"GREATEST(COALESCE(last_position_at, ?), ?)",
+				position.RecordedAt,
+				position.RecordedAt,
+			),
+		).
+		Set("updated_at", squirrel.Expr("now()")).
+		Where(squirrel.Eq{
+			"id":         position.TripID,
+			statusColumn: string(model.TripStatusActive),
+		}).
+		PlaceholderFormat(squirrel.Dollar).
+		ToSql()
+	if err != nil {
+		return model.TripPosition{}, fmt.Errorf("build update last position query: %w", err)
+	}
+
+	insertQuery, insertArgs, err := squirrel.
+		Insert("trip_positions").
+		Columns("trip_id", "latitude", "longitude", "recorded_at").
+		Values(
+			position.TripID,
+			position.Coordinates.Latitude,
+			position.Coordinates.Longitude,
+			position.RecordedAt,
+		).
+		Suffix("RETURNING id").
+		PlaceholderFormat(squirrel.Dollar).
+		ToSql()
+	if err != nil {
+		return model.TripPosition{}, fmt.Errorf("build insert trip position query: %w", err)
+	}
+
+	queryContext, cancel := context.WithTimeout(ctx, r.queryTimeout)
+	defer cancel()
+	db := executor(queryContext, r.pool)
+
+	commandTag, err := db.Exec(queryContext, updateQuery, updateArgs...)
+	if err != nil {
+		return model.TripPosition{}, fmt.Errorf("update last position: %w", err)
+	}
+	if commandTag.RowsAffected() == 0 {
+		_, err = r.get(queryContext, db, position.TripID)
+		if errors.Is(err, tripdomain.ErrTripNotFound) {
+			return model.TripPosition{}, tripdomain.ErrTripNotFound
+		}
+		if err != nil {
+			return model.TripPosition{}, err
+		}
+		return model.TripPosition{}, tripdomain.ErrTripCompleted
+	}
+
+	if err = db.QueryRow(queryContext, insertQuery, insertArgs...).Scan(&position.ID); err != nil {
+		return model.TripPosition{}, fmt.Errorf("insert trip position: %w", err)
+	}
+	return position, nil
 }
