@@ -39,6 +39,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("create application container: %w", err)
 	}
+	app.Start(appContext)
 
 	serverErrors := make(chan error, 1)
 	go func() {

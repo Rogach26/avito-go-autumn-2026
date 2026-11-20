@@ -1,9 +1,9 @@
-# TripGo — лабораторная работа 2
+# TripGo — лабораторная работа 3
 
-HTTP-сервис для создания, получения и завершения поездок. Данные хранятся в
-PostgreSQL, миграции выполняются Goose, а HTTP-типы и серверные интерфейсы
-генерируются из OpenAPI. Код разделён на слои, покрыт тестами и подключён к
-OpenTelemetry
+HTTP-сервис для создания, получения и завершения поездок, сохранения координат
+и получения маршрута. Данные хранятся в PostgreSQL, миграции выполняются Goose,
+а HTTP-типы и серверные интерфейсы генерируются из OpenAPI. Фоновый worker pool
+запрашивает координаты для активных поездок через Push Service
 
 ## API
 
@@ -12,6 +12,8 @@ OpenTelemetry
 | `POST` | `/api/v1/trips` | создать поездку |
 | `GET` | `/api/v1/trips/{tripId}` | получить поездку |
 | `POST` | `/api/v1/trips/{tripId}/finish` | завершить поездку |
+| `POST` | `/api/v1/trips/{tripId}/positions` | сохранить координату |
+| `GET` | `/api/v1/trips/{tripId}/positions` | получить маршрут |
 | `GET` | `/health` | проверить процесс без обращения к БД |
 | `GET` | `/ready` | проверить доступность PostgreSQL |
 
@@ -45,9 +47,10 @@ make migrate
 make run
 ```
 
-`tripgoctl environment start` создаёт `.env` с фактическими адресами PostgreSQL
-и OTLP. Корневой `.env.example` содержит локальные значения. Makefile сначала
-загружает `.env.example`, затем переопределяет значения из `.env`
+`tripgoctl environment start` создаёт `.env` с фактическими адресами PostgreSQL,
+OTLP и Push Service. Корневой `.env.example` содержит локальные значения.
+Makefile сначала загружает `.env.example`, затем переопределяет значения из
+`.env`
 
 Сервис доступен по адресу `http://localhost:8080`
 
@@ -59,10 +62,10 @@ make run
 docker build -f deploy/Dockerfile -t trip-service:local .
 ```
 
-PostgreSQL и observability поднимаются через `tripgoctl`, миграции применяются
-командой `make migrate`. В Docker Desktop адрес `localhost` из сгенерированного
-`.env` заменяется на адрес хоста, потому что внутри контейнера `localhost`
-указывает на сам контейнер:
+PostgreSQL, observability и Push Service поднимаются через `tripgoctl`, миграции
+применяются командой `make migrate`. В Docker Desktop адрес `localhost` из
+сгенерированного `.env` заменяется на адрес хоста, потому что внутри контейнера
+`localhost` указывает на сам контейнер:
 
 ```bash
 tripgoctl environment start
@@ -71,6 +74,7 @@ make migrate
 source .env
 CONTAINER_DATABASE_URL="${DATABASE_URL/localhost/host.docker.internal}"
 CONTAINER_OTEL_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT/localhost/host.docker.internal}"
+CONTAINER_PUSH_HTTP_URL="${PUSH_HTTP_URL/localhost/host.docker.internal}"
 
 docker run --rm -d \
   --name trip-service \
@@ -79,6 +83,7 @@ docker run --rm -d \
   --env-file .env \
   -e DATABASE_URL="$CONTAINER_DATABASE_URL" \
   -e OTEL_EXPORTER_OTLP_ENDPOINT="$CONTAINER_OTEL_ENDPOINT" \
+  -e PUSH_HTTP_URL="$CONTAINER_PUSH_HTTP_URL" \
   -p 8080:8080 \
   trip-service:local
 
@@ -110,10 +115,13 @@ docker stop --timeout 15 trip-service
 
 - `internal/domain/trip` — бизнес-модель, инварианты и доменные ошибки
 - `internal/model` — пассивные DTO между слоями
-- `internal/usecase/trip/create|get|finish` — сценарии приложения
-- `internal/http/trip/create|get|finish` — HTTP-обработчики
+- `internal/usecase` — сценарии поездок и координат
+- `internal/http/trip` — HTTP-обработчики поездок
+- `internal/http/position` — HTTP-обработчики координат
 - `internal/http/domainerror` — единое преобразование ошибок в API Problem
 - `internal/repository/trip` — SQL и преобразование данных PostgreSQL
+- `internal/worker/positions` — scanner, ограниченная очередь и worker pool
+- `internal/gateway/push` — HTTP-клиент Push Service
 - `internal/infra` — пул, транзакции и OpenTelemetry
 - `internal/container` — создание и связывание зависимостей
 - `cmd/trip-service` — конфигурация и жизненный цикл процесса
@@ -140,11 +148,12 @@ make lint
 ```
 
 Domain проверяется table-driven тестами без моков. Usecase и HTTP-обработчики
-проверяются unit-тестами с `gomock`. Repository и rollback транзакции
-проверяются на PostgreSQL из `tripgoctl`; эти тесты помечены
+проверяются unit-тестами с `gomock`. Repository, выборка устаревших поездок и
+rollback транзакции проверяются на PostgreSQL из `tripgoctl`; эти тесты помечены
 `//go:build integration`, используют уникальные данные и удаляют их после
 выполнения. `make test` выводит покрытие domain/usecase, которое должно быть не
-ниже 50%
+ниже 50%. Worker pool проверяется с управляемым ticker, `-race` и `goleak`, без
+`time.Sleep`
 
 ## Наблюдаемость
 
@@ -160,15 +169,40 @@ Domain проверяется table-driven тестами без моков. Use
 - `tripgo.trips.created`
 - `tripgo.trips.completed`
 - `tripgo.trips.active`
+- `tripgo.positions.saved`
+- `tripgo.stale_checks{result}`
+- `tripgo.position_requests.queue.size`
+- `tripgo.position_requests.workers.active`
+- `tripgo.position_requests{result}`
+- `tripgo.position_requests.duration{result}`
 
 В `http.route` записывается шаблон маршрута без UUID. Недоступность OTLP
 collector не мешает обработке HTTP-запросов. Адреса Jaeger и Grafana выводит
 `tripgoctl connect`
 
+## Опрос устаревших поездок
+
+```text
+scanner -> bounded queue -> workers -> Push Service
+```
+
+Scanner раз в `POSITION_CHECK_INTERVAL` одним SQL-запросом выбирает активные
+поездки, у которых координат не было дольше `POSITION_STALE_AFTER`. Ограниченная
+очередь защищает память, а фиксированный пул ограничивает число одновременных
+запросов к Push Service. Одна поездка не ставится в очередь повторно. После
+сохранения координаты ожидающая задача отменяется и учитывается как
+`tripgo.position_requests{result="cancelled"}`
+
+Постановка в очередь неблокирующая. Если очередь заполнена, новая задача
+дропается, записывается `Warn` и увеличивается
+`tripgo.stale_checks{result="dropped"}`.
+Поездка снова попадёт в выборку на следующем тике, если координата так и не
+пришла
+
 ## Переменные окружения
 
-Все переменные обязательны. Безопасные локальные значения находятся в
-`.env.example`
+Все переменные сервиса обязательны. `PUSH_ADMIN_URL` нужен только для ручной
+проверки заглушки. Безопасные локальные значения находятся в `.env.example`
 
 | Переменная | Пример | Назначение |
 |---|---|---|
@@ -190,6 +224,13 @@ collector не мешает обработке HTTP-запросов. Адрес
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` | протокол OTLP exporter |
 | `OTEL_RESOURCE_ATTRIBUTES` | `service.namespace=tripgo,deployment.environment=local` | атрибуты ресурса OpenTelemetry |
 | `OTEL_TRACES_SAMPLER` | `parentbased_always_on` | стратегия сэмплирования трейсов |
+| `POSITION_CHECK_INTERVAL` | `30s` | период поиска устаревших поездок |
+| `POSITION_STALE_AFTER` | `60s` | допустимый возраст последней координаты |
+| `POSITION_WORKERS` | `4` | число worker-горутин |
+| `POSITION_QUEUE_SIZE` | `100` | ёмкость очереди задач |
+| `PUSH_HTTP_URL` | `http://localhost:8090` | адрес Push Service |
+| `PUSH_ADMIN_URL` | `http://localhost:8091` | admin API заглушки для ручной проверки |
+| `PUSH_REQUEST_TIMEOUT` | `1s` | таймаут одного запроса координаты |
 
 Сервис не стартует, если обязательная переменная отсутствует или имеет
 некорректное значение
@@ -221,12 +262,18 @@ curl -i -X POST http://localhost:8080/api/v1/trips \
   }'
 
 curl -i http://localhost:8080/api/v1/trips/<TRIP_ID>
+curl -i -X POST http://localhost:8080/api/v1/trips/<TRIP_ID>/positions \
+  -H 'Content-Type: application/json' \
+  -d "{\"coordinates\":{\"latitude\":59.93,\"longitude\":30.33},\"recorded_at\":\"$(date -u +%FT%TZ)\"}"
+curl -i http://localhost:8080/api/v1/trips/<TRIP_ID>/positions
 curl -i -X POST http://localhost:8080/api/v1/trips/<TRIP_ID>/finish
 ```
 
 Полный откат миграций удаляет локальные данные:
 
 ```bash
+make migrate-down
+make migrate-down
 make migrate-down
 make migrate-down
 make migrate
@@ -243,9 +290,10 @@ tripgoctl environment start
 ```
 
 По `SIGINT` или `SIGTERM` один `SHUTDOWN_TIMEOUT` ограничивает остановку
-HTTP-сервера, закрытие пула PostgreSQL и телеметрии. `service stopped`
-записывается после успешного завершения всех действий. При исчерпании бюджета
-ошибка записывается в лог и процесс завершается с кодом `1`
+HTTP-сервера, scanner и workers, закрытие клиента Push Service, пула PostgreSQL
+и телеметрии. `service stopped` записывается после успешного завершения всех
+действий. При исчерпании бюджета ошибка записывается в лог и процесс завершается
+с кодом `1`
 
 ## Решения
 

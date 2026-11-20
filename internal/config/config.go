@@ -28,6 +28,12 @@ type Config struct {
 	OTelExporterProtocol    string
 	OTelResourceAttributes  string
 	OTelTracesSampler       string
+	PositionCheckInterval   time.Duration
+	PositionStaleAfter      time.Duration
+	PositionWorkers         int
+	PositionQueueSize       int
+	PushHTTPURL             string
+	PushRequestTimeout      time.Duration
 }
 
 func Load() (Config, error) {
@@ -118,6 +124,30 @@ func Load() (Config, error) {
 	if otelTracesSampler != "parentbased_always_on" {
 		return Config{}, fmt.Errorf("OTEL_TRACES_SAMPLER must be parentbased_always_on")
 	}
+	positionCheckInterval, err := readDurationEnv("POSITION_CHECK_INTERVAL")
+	if err != nil {
+		return Config{}, err
+	}
+	positionStaleAfter, err := readDurationEnv("POSITION_STALE_AFTER")
+	if err != nil {
+		return Config{}, err
+	}
+	positionWorkers, err := readPositiveIntEnv("POSITION_WORKERS")
+	if err != nil {
+		return Config{}, err
+	}
+	positionQueueSize, err := readPositiveIntEnv("POSITION_QUEUE_SIZE")
+	if err != nil {
+		return Config{}, err
+	}
+	pushHTTPURL, err := readRequiredStringEnv("PUSH_HTTP_URL")
+	if err != nil {
+		return Config{}, err
+	}
+	pushRequestTimeout, err := readDurationEnv("PUSH_REQUEST_TIMEOUT")
+	if err != nil {
+		return Config{}, err
+	}
 
 	return Config{
 		HTTPAddr:                httpAddr,
@@ -138,6 +168,12 @@ func Load() (Config, error) {
 		OTelExporterProtocol:    otelExporterProtocol,
 		OTelResourceAttributes:  otelResourceAttributes,
 		OTelTracesSampler:       otelTracesSampler,
+		PositionCheckInterval:   positionCheckInterval,
+		PositionStaleAfter:      positionStaleAfter,
+		PositionWorkers:         positionWorkers,
+		PositionQueueSize:       positionQueueSize,
+		PushHTTPURL:             pushHTTPURL,
+		PushRequestTimeout:      pushRequestTimeout,
 	}, nil
 }
 
@@ -175,6 +211,21 @@ func readInt32Env(name string) (int32, error) {
 		return 0, fmt.Errorf("parse %s: %w", name, err)
 	}
 	return int32(parsed), nil
+}
+
+func readPositiveIntEnv(name string) (int, error) {
+	value, err := readRequiredStringEnv(name)
+	if err != nil {
+		return 0, err
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("parse %s: %w", name, err)
+	}
+	if parsed <= 0 {
+		return 0, fmt.Errorf("%s must be greater than zero", name)
+	}
+	return parsed, nil
 }
 
 func readLogLevelEnv(name string) (slog.Level, error) {
